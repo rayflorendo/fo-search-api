@@ -11,13 +11,16 @@ DATA_URL = os.getenv("DATA_URL")
 API_KEY  = os.getenv("API_KEY", "")
 
 if not DATA_URL:
-    # 起動時に分かりやすく失敗させる
     raise RuntimeError("ENV DATA_URL is required (points to data.jsonl raw URL)")
 
 # === APP ===
-app = FastAPI(title="FO Search API", version="1.0.0", description="Search API for FO knowledge (JSONL)")
+app = FastAPI(
+    title="FO Search API",
+    version="1.0.0",
+    description="Search API for FO knowledge (JSONL)"
+)
 
-# GPTs / ブラウザ からの呼び出しで困らないように CORS をゆるめに
+# CORS（GPTs/ブラウザからの呼び出しで困らないように）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=False,
@@ -59,7 +62,6 @@ def _build_index() -> None:
                 "text": text
             })
 
-    # 空ならそのまま
     if not chunks:
         vec, X = None, None
         _last_build = time.time()
@@ -143,11 +145,27 @@ def search(q: str = Query(..., description="自然文OK"),
 
     return {"results": results}
 
-# === Manual refresh (requires API_KEY) ===
-@app.post("/refresh")
-def refresh(authorization: str | None = Header(None), key: str | None = Query(None)):
-    if API_KEY and not (authorization == f"Bearer {API_KEY}" or key == API_KEY):
+# === Manual refresh (API key: Bearer / X-API-Key / ?key= のどれでも可) ===
+@app.api_route("/refresh", methods=["POST", "GET"])
+def refresh(
+    authorization: str | None = Header(None),
+    key: str | None = Query(None),
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+):
+    ok = False
+    if API_KEY:
+        if authorization == f"Bearer {API_KEY}":
+            ok = True
+        if key == API_KEY:
+            ok = True
+        if x_api_key == API_KEY:
+            ok = True
+    else:
+        ok = True
+
+    if not ok:
         raise HTTPException(401, "bad token")
+
     _build_index()
     return {"ok": True, "indexed_chunks": len(chunks), "last_build_epoch": _last_build}
 
@@ -159,11 +177,10 @@ def openapi():
         version="1.0.0",
         description=(
             "Search FO knowledge stored as JSONL. "
-            "Auth: set header `Authorization: Bearer <API_KEY>` or use query `?key=`."
+            "Auth: header `Authorization: Bearer <API_KEY>` or header `X-API-Key: <API_KEY>` or query `?key=`."
         ),
         routes=app.routes,
     )
-    # Bearer 認証の定義を追加（GPTsのUIで見えるように）
     schema.setdefault("components", {}).setdefault("securitySchemes", {})["BearerAuth"] = {
         "type": "http",
         "scheme": "bearer",
