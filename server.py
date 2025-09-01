@@ -9,6 +9,8 @@ from sklearn.metrics.pairwise import linear_kernel
 # === ENV ===
 DATA_URL = os.getenv("DATA_URL")
 API_KEY  = os.getenv("API_KEY", "")
+# ← 追加：OpenAPI の servers に入れるベースURL（必要なら環境変数で上書き）
+BASE_URL = os.getenv("BASE_URL", "https://fo-search-api.onrender.com")
 
 if not DATA_URL:
     raise RuntimeError("ENV DATA_URL is required (points to data.jsonl raw URL)")
@@ -181,6 +183,9 @@ def openapi():
         ),
         routes=app.routes,
     )
+    # ← 追加：GPTs 側で `servers` が必ず見えるように固定
+    schema["servers"] = [{"url": BASE_URL}]
+    # Bearer 認証の定義
     schema.setdefault("components", {}).setdefault("securitySchemes", {})["BearerAuth"] = {
         "type": "http",
         "scheme": "bearer",
