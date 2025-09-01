@@ -9,7 +9,6 @@ from sklearn.metrics.pairwise import linear_kernel
 # === ENV ===
 DATA_URL = os.getenv("DATA_URL")
 API_KEY  = os.getenv("API_KEY", "")
-# OpenAPI の servers に入れるベースURL（必要なら環境変数で上書き）
 BASE_URL = os.getenv("BASE_URL", "https://fo-search-api.onrender.com")
 
 if not DATA_URL:
@@ -22,7 +21,7 @@ app = FastAPI(
     description="Search API for FO knowledge (JSONL)"
 )
 
-# CORS（GPTs/ブラウザからの呼び出しで困らないように）
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=False,
@@ -30,8 +29,8 @@ app.add_middleware(
 )
 
 # === In-memory index ===
-pages: List[Dict[str, Any]] = []   # {page_title, url}
-chunks: List[Dict[str, Any]] = []  # {page_idx, page_title, url, heading, text}
+pages: List[Dict[str, Any]] = []
+chunks: List[Dict[str, Any]] = []
 vec, X = None, None
 _last_build = 0.0
 
@@ -69,9 +68,9 @@ def _build_index() -> None:
         _last_build = time.time()
         return
 
-    # 日本語に強い 文字 n-gram
     corpus = [f"{c['page_title']} {c['heading']}\n{c['text']}" for c in chunks]
-    vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2,5), max_features=150_000).fit(corpus)
+    vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2,5),
+                          max_features=150_000).fit(corpus)
     X = vec.transform(corpus)
     _last_build = time.time()
 
@@ -95,15 +94,13 @@ def _mmr(query_vec, top=12, lam=0.5):
         chosen.append(best_i); cand.pop(best_pos)
     return chosen
 
-# === Health / Root ===
+# === Endpoints ===
 @app.get("/")
 def root():
-    return {
-        "name": "FO Search API",
-        "status": "ok",
-        "indexed_chunks": len(chunks),
-        "last_build_epoch": _last_build,
-    }
+    return {"name": "FO Search API",
+            "status": "ok",
+            "indexed_chunks": len(chunks),
+            "last_build_epoch": _last_build}
 
 @app.get("/healthz")
 def healthz():
@@ -111,16 +108,15 @@ def healthz():
 
 @app.get("/status")
 def status():
-    return {"indexed_chunks": len(chunks), "last_build_epoch": _last_build}
+    return {"indexed_chunks": len(chunks),
+            "last_build_epoch": _last_build}
 
-# === Search ===
 @app.get("/search")
 def search(q: str = Query(..., description="自然文OK"),
            top_k: int = 12,
            diversity: float = 0.5,
-           authorization: str | None = Header(None, description="Bearer <API_KEY>"),
-           key: str | None = Query(None, description="ブラウザ検証用")):
-    # 認証（?key= も許可）
+           authorization: str | None = Header(None),
+           key: str | None = Query(None)):
     if API_KEY and not (authorization == f"Bearer {API_KEY}" or key == API_KEY):
         raise HTTPException(401, "bad token")
 
@@ -129,66 +125,59 @@ def search(q: str = Query(..., description="自然文OK"),
         return {"results": []}
 
     qv = vec.transform([q])
-    idxs = _mmr(qv, top=min(max(top_k,1), 20), lam=max(0.0, min(diversity,1.0)))
+    idxs = _mmr(qv, top=min(max(top_k,1),20),
+                lam=max(0.0, min(diversity,1.0)))
 
-    results = []
-    seen_pages = set()
+    results, seen_pages = [], set()
     for i in idxs:
         c = chunks[i]
-        # 多様性のため同一ページの連発は抑制（6件以降）
         if c["url"] in seen_pages and len(results) >= 6:
             continue
         seen_pages.add(c["url"])
-
         disp_title = c["page_title"] + (f"｜{c['heading']}" if c["heading"] else "")
         results.append({
-            "url": c["url"],                 # #アンカーは付けない（リンクズレ防止）
-            "title": disp_title,             # 表示用タイトル（改変禁止前提）
-            "snippet": c["text"][:2000]      # ← 長めに（GPTが補完しにくい）
+            "url": c["url"],
+            "title": disp_title,
+            "snippet": c["text"][:2000]
         })
         if len(results) >= top_k:
             break
-
     return {"results": results}
 
-# === Manual refresh（非同期トリガー）===
-@app.api_route("/refresh", methods=["POST", "GET"])
+@app.api_route("/refresh", methods=["POST","GET"])
 def refresh(background_tasks: BackgroundTasks,
             authorization: str | None = Header(None),
             key: str | None = Query(None),
             x_api_key: str | None = Header(None, alias="X-API-Key")):
-    ok = False
+    ok=False
     if API_KEY:
-        if authorization == f"Bearer {API_KEY}": ok = True
-        if key == API_KEY: ok = True
-        if x_api_key == API_KEY: ok = True
+        if authorization == f"Bearer {API_KEY}": ok=True
+        if key == API_KEY: ok=True
+        if x_api_key == API_KEY: ok=True
     else:
-        ok = True
+        ok=True
     if not ok:
-        raise HTTPException(401, "bad token")
-
-    # 重い処理はバックグラウンドで実行 → 即応答（Render無料枠のタイムアウト回避）
+        raise HTTPException(401,"bad token")
     background_tasks.add_task(_build_index)
-    return {"ok": True, "started": True, "indexed_chunks": len(chunks), "last_build_epoch": _last_build}
+    return {"ok": True, "started": True,
+            "indexed_chunks": len(chunks),
+            "last_build_epoch": _last_build}
 
-# === OpenAPI (explicit) ===
-@app.get("/openapi.json")
-def openapi():
+# === OpenAPI override ===
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
     schema = get_openapi(
         title="FO Search API",
         version="1.0.0",
-        description=(
-            "Search FO knowledge stored as JSONL. "
-            "Auth: header `Authorization: Bearer <API_KEY>` "
-            "or header `X-API-Key: <API_KEY>` or query `?key=`."
-        ),
+        description="Search FO knowledge stored as JSONL.",
         routes=app.routes,
     )
-    # GPTs 側で `servers` が必ず見えるように固定
     schema["servers"] = [{"url": BASE_URL}]
-    # Bearer 認証の定義（GPTs の「認証」UIで検出される）
     schema.setdefault("components", {}).setdefault("securitySchemes", {})["BearerAuth"] = {
-        "type": "http",
-        "scheme": "bearer",
+        "type": "http", "scheme": "bearer"
     }
-    return schema
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
