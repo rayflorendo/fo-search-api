@@ -1,6 +1,6 @@
 import os, json, time, requests
 from typing import List, Dict, Any
-from fastapi import FastAPI, Query, Header, HTTPException
+from fastapi import FastAPI, Query, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -9,7 +9,7 @@ from sklearn.metrics.pairwise import linear_kernel
 # === ENV ===
 DATA_URL = os.getenv("DATA_URL")
 API_KEY  = os.getenv("API_KEY", "")
-# ← 追加：OpenAPI の servers に入れるベースURL（必要なら環境変数で上書き）
+# OpenAPI の servers に入れるベースURL（必要なら環境変数で上書き）
 BASE_URL = os.getenv("BASE_URL", "https://fo-search-api.onrender.com")
 
 if not DATA_URL:
@@ -109,6 +109,10 @@ def root():
 def healthz():
     return {"ok": True, "indexed": len(chunks)}
 
+@app.get("/status")
+def status():
+    return {"indexed_chunks": len(chunks), "last_build_epoch": _last_build}
+
 # === Search ===
 @app.get("/search")
 def search(q: str = Query(..., description="自然文OK"),
@@ -138,38 +142,34 @@ def search(q: str = Query(..., description="自然文OK"),
 
         disp_title = c["page_title"] + (f"｜{c['heading']}" if c["heading"] else "")
         results.append({
-            "url": c["url"],                 # #アンカーは付けない
-            "title": disp_title,             # 表示用タイトル（改変しないで使う想定）
-            "snippet": c["text"][:700]
+            "url": c["url"],                 # #アンカーは付けない（リンクズレ防止）
+            "title": disp_title,             # 表示用タイトル（改変禁止前提）
+            "snippet": c["text"][:2000]      # ← 長めに（GPTが補完しにくい）
         })
         if len(results) >= top_k:
             break
 
     return {"results": results}
 
-# === Manual refresh (API key: Bearer / X-API-Key / ?key= のどれでも可) ===
+# === Manual refresh（非同期トリガー）===
 @app.api_route("/refresh", methods=["POST", "GET"])
-def refresh(
-    authorization: str | None = Header(None),
-    key: str | None = Query(None),
-    x_api_key: str | None = Header(None, alias="X-API-Key"),
-):
+def refresh(background_tasks: BackgroundTasks,
+            authorization: str | None = Header(None),
+            key: str | None = Query(None),
+            x_api_key: str | None = Header(None, alias="X-API-Key")):
     ok = False
     if API_KEY:
-        if authorization == f"Bearer {API_KEY}":
-            ok = True
-        if key == API_KEY:
-            ok = True
-        if x_api_key == API_KEY:
-            ok = True
+        if authorization == f"Bearer {API_KEY}": ok = True
+        if key == API_KEY: ok = True
+        if x_api_key == API_KEY: ok = True
     else:
         ok = True
-
     if not ok:
         raise HTTPException(401, "bad token")
 
-    _build_index()
-    return {"ok": True, "indexed_chunks": len(chunks), "last_build_epoch": _last_build}
+    # 重い処理はバックグラウンドで実行 → 即応答（Render無料枠のタイムアウト回避）
+    background_tasks.add_task(_build_index)
+    return {"ok": True, "started": True, "indexed_chunks": len(chunks), "last_build_epoch": _last_build}
 
 # === OpenAPI (explicit) ===
 @app.get("/openapi.json")
@@ -179,13 +179,14 @@ def openapi():
         version="1.0.0",
         description=(
             "Search FO knowledge stored as JSONL. "
-            "Auth: header `Authorization: Bearer <API_KEY>` or header `X-API-Key: <API_KEY>` or query `?key=`."
+            "Auth: header `Authorization: Bearer <API_KEY>` "
+            "or header `X-API-Key: <API_KEY>` or query `?key=`."
         ),
         routes=app.routes,
     )
-    # ← 追加：GPTs 側で `servers` が必ず見えるように固定
+    # GPTs 側で `servers` が必ず見えるように固定
     schema["servers"] = [{"url": BASE_URL}]
-    # Bearer 認証の定義
+    # Bearer 認証の定義（GPTs の「認証」UIで検出される）
     schema.setdefault("components", {}).setdefault("securitySchemes", {})["BearerAuth"] = {
         "type": "http",
         "scheme": "bearer",
