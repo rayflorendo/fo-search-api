@@ -70,7 +70,7 @@ def _build_index() -> None:
 
     corpus = [f"{c['page_title']} {c['heading']}\n{c['text']}" for c in chunks]
     vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2,5),
-                          max_features=150_000).fit(corpus)
+                          max_features=50_000).fit(corpus)
     X = vec.transform(corpus)
     _last_build = time.time()
 
