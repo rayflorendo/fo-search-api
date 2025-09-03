@@ -113,7 +113,7 @@ def status():
 
 @app.get("/search")
 def search(q: str = Query(..., description="自然文OK"),
-           top_k: int = 12,
+           top_k: int = 5,
            diversity: float = 0.5,
            authorization: str | None = Header(None),
            key: str | None = Query(None)):
