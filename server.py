@@ -138,7 +138,7 @@ def search(q: str = Query(..., description="自然文OK"),
         results.append({
             "url": c["url"],
             "title": disp_title,
-            "snippet": c["text"][:2000]
+            "snippet": c["text"][:500]
         })
         if len(results) >= top_k:
             break
